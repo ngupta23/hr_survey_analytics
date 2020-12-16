@@ -34,7 +34,7 @@ library(SnowballC)
 ## Read Data
 
 ```{r}
-filename = "../data/Employee Survey Data Exercise-NikhilGupta.xlsx"
+filename = "../data/Employee Survey Data Exercise.xlsx"
 ```
 
 ### Survey 
