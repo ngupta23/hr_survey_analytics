@@ -1,0 +1,858 @@
+---
+title: "Exploratory Analysis"
+author: "Nikhil Gupta"
+ate: "`r Sys.time()`"
+always_allow_html: yes
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 6
+  github_document:
+    toc: true
+    toc_depth: 6
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup 
+
+## Load Libraries
+```{r}
+library(tidyverse)
+library(readxl)
+library(ggthemes)
+# library(DT)
+library(caret)
+library(wordcloud)
+library(tm)
+library(SnowballC)
+```
+
+## Read Data
+
+```{r}
+filename = "../data/Employee Survey Data Exercise-NikhilGupta.xlsx"
+```
+
+### Survey 
+
+```{r}
+data_survey = readxl::read_excel(filename, sheet = 2)
+data_survey %>% glimpse()
+```
+
+#### Missing Value Analysis
+
+```{r}
+missing = as.data.frame(colSums(is.na(data_survey))) %>% 
+  setNames(., c("NumMissing")) %>% 
+  tibble::rownames_to_column(var = "Question") %>% 
+  mutate(PerMissing = round(NumMissing/nrow(data_survey)*100,1)) %>% 
+  dplyr::arrange(desc(NumMissing))
+
+missing$Question = factor(missing$Question, levels = missing$Question, order = order(missing$PerMissing))
+missing$Question = fct_rev(missing$Question)
+
+missing
+```
+
+```{r fig.width=12}
+p = missing %>% 
+  ggplot(aes(x = Question, y = PerMissing)) + 
+  geom_bar(stat = "identity", fill='light blue') +
+  # geom_text(aes(label=scales::comma(PerMissing)),vjust=-.8,size=3) +
+  labs(y='Percentage of Missing Values',x='Field') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ggthemes::theme_pander()
+print(p)
+```
+
+
+* **Most of the missing values are form the free form comments. We will simply remove them for the initial analysis**
+* **For the responses to questions that have missing values, we will impute these intelligently (using a nearest neighbors approach)**
+* We will also remove SurveyID
+
+```{r}
+data_survey = data_survey %>% 
+  dplyr::select(-c("Comment Topic", "q79", "SurveyID"))
+# data_survey %>%  glimpse()
+```
+
+### Survey Design
+
+```{r}
+data_survey_design = readxl::read_excel(filename, sheet = 3)
+data_survey_design %>% glimpse()
+```
+
+#### Missing Value Analysis
+
+```{r}
+missing = as.data.frame(colSums(is.na(data_survey_design))) %>% 
+  setNames(., c("NumMissing")) %>% 
+  tibble::rownames_to_column(var = "Question") %>% 
+  mutate(PerMissing = round(NumMissing/nrow(data_survey)*100,1)) %>% 
+  dplyr::arrange(desc(NumMissing))
+
+missing$Question = factor(missing$Question, levels = missing$Question, order = order(missing$PerMissing))
+missing$Question = fct_rev(missing$Question)
+
+missing
+```
+
+* Not much is missing.
+* The missing columns are related to the comment questions
+
+### Demographics
+
+```{r}
+data_demographics = readxl::read_excel(
+  filename,
+  sheet = 4,
+  # n_max=5,
+  col_types=c("text")
+)
+data_demographics %>% glimpse()
+```
+
+```{r}
+data_demographics = data_demographics %>% 
+  
+  # Rename Columns
+  dplyr::rename(Tenure = Tenure...5) %>% 
+  dplyr::rename(TenureBracket = Tenure...11) %>% 
+  dplyr::rename(PerformanceRating = 'Performance Rating (Higher is better)') %>% 
+  dplyr::rename(NineBox = '9 Box') %>% 
+  dplyr::rename(State = 'Location - State') %>% 
+
+  # Convert to numeric where applicable
+  mutate_each(funs(as.numeric), c("Tenure", "PerformanceRating"))
+```
+
+#### Missing Value Analysis
+
+```{r}
+missing = as.data.frame(colSums(is.na(data_demographics))) %>% 
+  setNames(., c("NumMissing")) %>% 
+  tibble::rownames_to_column(var = "Question") %>% 
+  mutate(PerMissing = round(NumMissing/nrow(data_survey)*100,1)) %>% 
+  dplyr::arrange(desc(NumMissing))
+
+missing$Question = factor(missing$Question, levels = missing$Question, order = order(missing$PerMissing))
+missing$Question = fct_rev(missing$Question)
+
+missing
+```
+
+```{r fig.width=8, fig.height=6}
+p = missing %>% 
+  ggplot(aes(x = Question, y = PerMissing)) + 
+  geom_bar(stat = "identity", fill='light blue') +
+  # geom_text(aes(label=scales::comma(PerMissing)),vjust=-.8,size=3) +
+  labs(y='Percentage of Missing Values',x='Field') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ggthemes::theme_pander()
+print(p)
+```
+
+** Missing Values 
+
+* The only fields that we can possibly impute are "Leader of People", "Voluntary Arrtition", "WFH"
+* The following fields can not be imputed "Performance Rating", "Race and Ethnicity", "NineBox" related fields.
+* A few other fields were not analyzed (given time constraints), e.g. "Call Center", "Sales". Given more time and context, these could be evaluated as well.
+
+```{r}
+num_values_in_fields = data_demographics %>% 
+  summarise_all(n_distinct) %>% 
+  pivot_longer(everything(), names_to = "Question", values_to = "UniqueVals") %>% 
+  dplyr::arrange(UniqueVals)
+
+missing_plusmore = full_join(missing, num_values_in_fields, by = "Question")
+missing_plusmore %>% 
+  dplyr::arrange(UniqueVals)
+```
+
+```{r}
+for (name in missing_plusmore$Question){
+  if (length(unique(data_demographics[[name]])) < 50){
+    missing_for_this = missing_plusmore %>% dplyr::filter(Question == name) %>% dplyr::select(PerMissing) %>% pluck(1) 
+    print(paste0("Column Name = ", name, " --> Missing %: ", missing_for_this))
+    print(table(data_demographics[[name]]))
+    cat("\n\n")
+  }
+} 
+```
+
+* Ignore the following columns for now. If given more time, we could evaluate how to get missing data and use in analysis
+  - Call Center
+  - Distribution Center
+
+* Impute the following values. Many places assume that missing values are False or 0
+  - WFH
+  - Voluntary Attrition
+  - Leader of People
+  - Sales Function
+  
+* Keep but dont impute
+  - 9Box related
+  - Race and Ethnicity (Change NA to Unknown)
+  - Performance Rating
+  - Tenure Bracket
+  - Gender (Change NA to Unknown)
+  
+* Keep and no missing data
+  - State
+  - Country
+  - Exempt Status
+  - Management Level (Detailed)
+  - HIPO
+  - Manager Change in the last year
+  - Job Change in last year
+  - Promotion in last year
+  - Business Unit
+  - Language
+
+
+```{r}
+data_demographics = data_demographics %>% 
+  dplyr::rename("VoluntaryAttrition" = "Voluntary Turnover in the next six months after the survey") %>% 
+  dplyr::mutate(
+    VoluntaryAttrition = replace_na(VoluntaryAttrition, 0),
+    VoluntaryAttrition = str_replace(VoluntaryAttrition, "x", "1"),
+    VoluntaryAttrition = factor(VoluntaryAttrition, order = TRUE, levels = c("0", "1"))
+    ) 
+
+table(data_demographics$VoluntaryAttrition)
+```
+
+```{r}
+data_demographics = data_demographics %>% 
+  dplyr::mutate(
+    WFH = replace_na(WFH, 0),
+    WFH = str_replace(WFH, "WFH", "1"),
+    WFH = factor(WFH, order = TRUE, levels = c("0", "1"))
+    ) 
+
+table(data_demographics$WFH)
+```
+
+```{r}
+data_demographics = data_demographics %>% 
+  dplyr::rename("PeopleLeader" = "Leader of People") %>% 
+  dplyr::mutate(
+    PeopleLeader = replace_na(PeopleLeader, 0),
+    PeopleLeader = str_replace(PeopleLeader, "x", "1"),
+    PeopleLeader = factor(PeopleLeader, order = TRUE, levels = c("0", "1"))
+    ) 
+
+table(data_demographics$PeopleLeader)
+```
+
+```{r}
+data_demographics = data_demographics %>% 
+  dplyr::rename("SalesFunction" = "Sales Function") %>% 
+  dplyr::mutate(
+    SalesFunction = replace_na(SalesFunction, "Not Sales")
+    # SalesFunction = str_replace(SalesFunction, "x", "1"),
+    #SalesFunction = factor(SalesFunction, order = TRUE, levels = c("0", "1"))
+    ) 
+
+table(data_demographics$SalesFunction)
+```
+
+```{r}
+data_demographics = data_demographics %>% 
+  dplyr::rename(
+    "RaceEthnicity" = "Race or Ethnicity",
+    "MgtLvlDetailed" = "Management Level (Detailed)",
+    "MgrChg1yr" = "Manager Change in the last year",
+    "JobChg1yr" = "Job Change in last year",
+    "JobLvlChg1yr" = "Job Level Change in last year",
+    "Promoted1yr" = "Promotion in last year"
+  )
+
+colnames(data_demographics)
+```
+
+```{r}
+data_demographics = data_demographics %>% 
+  dplyr::mutate(
+    Gender = replace_na(Gender, "Unknown"),
+    RaceEthnicity = replace_na(RaceEthnicity, "Unknown"),
+    ) 
+
+table(data_demographics$Gender)
+table(data_demographics$ReceEthnicity)
+
+```
+
+### Revenue
+
+```{r}
+data_survey_revenue = readxl::read_excel(filename, sheet = 5)
+data_survey_revenue %>% glimpse()
+```
+
+```{r}
+library(tswge)
+p = plotts.sample.wge(data_survey_revenue$`REVENUE (000)`)
+```
+
+* Looks like time series data related to previous revenue and forecast.
+* We will not focus on revenue data for this analysis
+
+## Categorical Encoding 
+
+* Encode 9Box Data, Tenure, etc.
+```{r}
+data_demographics = data_demographics %>% 
+  dplyr::mutate(
+    NineBox = factor(
+      NineBox,
+      order = TRUE,
+      levels = c("1, 1", "1, 2", "1, 3", "2, 1", "2, 2", "2, 3", "3, 1", "3, 2", "3, 3")
+      )
+    )
+```
+
+```{r}
+data_demographics = data_demographics %>%
+  tidyr::separate(col = NineBox, into = c("PerfCoord", "PotCoord"), sep = ", ", remove = FALSE) %>% 
+  dplyr::mutate(
+    PotCoord = recode_factor(PotCoord, "1" = 'Low', "2" = 'Moderate', "3" = 'High', .ordered=TRUE),
+    PerfCoord = recode_factor(PerfCoord, "1" = 'Low', "2" = 'Moderate', "3" = 'High', .ordered=TRUE),
+    TenureBracket = recode_factor(
+      TenureBracket,
+      "Less Than 1 Year" = "Less Than 1 Year",
+      "1-3 Years" = "1-3 Years",
+      "3-5 Years" = "3-5 Years",
+      "5-10 Years" = "5-10 Years",
+      "15-20 Years" = "15-20 Years",
+      "20+ Years" = "20+ Years",
+      .ordered=TRUE)
+    #factor(temperature_vector, order = TRUE, levels = c("Low", "Medium", "High"))
+  )
+
+head(data_demographics)
+```
+
+
+# Exploratory Analysis 
+
+The following analysis focussed predominantly on 2 vectors. More vectors could be analyzed using a similar strategy as that outlined in this report.
+
+1. Demographics: 
+  - Gender
+  - Race/Ethnicity
+2. Dimension
+  - Diversity
+  - Inclusion
+
+## Survey Design
+
+```{r}
+ques_freq = as.data.frame(table(data_survey_design$Dimension))
+colnames(ques_freq) = c("Dimension", "QuestionCount")
+ques_freq %>% dplyr::arrange(desc(QuestionCount), Dimension)
+```
+
+## Survey Responses
+
+### KNN Impute Survey
+
+* **The survey responses had some missing values as shown above. Since these represented less than 2.5% of the total dataset (which itself is large), one way to handle this is to just delete these responses. This is OK if the missing datas occurs at random. However, in survey responses, this is generally not true. Usually, respondents who have a negative view of a question are more prone to leave it empty rather than fill in a negative or low rating. Hence we need to impute the data.**
+
+* **We could have used various strategies for imputing missing values in survey responses. One way is to just impute the mean/median/mode values of the question. However this introduces bias in the data. As mentioned above, the questions that are unanswered are the ones that the respondent does not feel comfortable answering and would generally be lower than the mean/median/mode (assuming scale goes from low for bad to high for good). Imputing these with the mean (or equivalent) would artificially increase their score.** 
+
+* **Hence, a neaest neighbors approach would be a more suitable approach to impute these values. In this approach, we look at respondents (nearest neighbors) that have answered the other survey questions similar to the respondent who has a missing response to a question. It is highly likely that if the other questions are answered similarly, then the missing question would also have been answered similarly. Hence we can take the average of the responses of the nearest neighbors as a surrogate for the missing response. Though still not perfect, this approach offers a slightly better strategy for handling missing data compared to the others mentioned above.**
+
+```{r}
+data_survey_numeric_responses = data_survey %>%
+  dplyr::select(starts_with(c("EN", "CU"), ignore.case = FALSE))
+
+data_survey_non_numeric_responses = data_survey %>%
+  dplyr::select(!starts_with(c("EN", "CU"), ignore.case = FALSE))
+```
+
+```{r}
+data_survey_numeric_responses %>% glimpse()
+data_survey_non_numeric_responses %>% glimpse()
+```
+
+```{r}
+preProcValues = caret::preProcess(
+  as.data.frame(data_survey_numeric_responses),
+  method = c("knnImpute"),
+  k = 10,
+  knnSummary = mean
+)
+data_survey_numeric_responses_imputed = predict(preProcValues, data_survey_numeric_responses)
+```
+
+```{r}
+procNames <- data.frame(col = names(preProcValues$mean), mean = preProcValues$mean, sd = preProcValues$std)
+for(i in procNames$col){
+ data_survey_numeric_responses_imputed[i] = round(data_survey_numeric_responses_imputed[i]*preProcValues$std[i]+preProcValues$mean[i]) 
+}
+data_survey_numeric_responses_imputed %>% glimpse()
+```
+
+```{r}
+data_survey_combined = cbind(data_survey_non_numeric_responses, data_survey_numeric_responses_imputed)
+data_survey_combined %>%  glimpse()
+```
+
+```{r}
+data_combined = full_join(data_survey_combined, data_demographics, by="PersonID") 
+data_combined %>% glimpse()
+```
+
+### Reformat
+
+* Convert to tall skinny format for plotting and analysis
+
+```{r}
+data_combined_longer = data_combined %>% pivot_longer(
+  cols = starts_with(c("EN", "CU"), ignore.case = FALSE),
+  names_to = "Question",
+  values_to = "Response"
+) 
+data_combined_longer %>% glimpse()
+```
+
+```{r}
+data_combined_longer = full_join(data_combined_longer, data_survey_design, by = c("Question" = "ENCode"))
+data_combined_longer %>% glimpse()
+```
+
+```{r}
+table(data_combined_longer$Response)
+data_combined_longer[(is.na(data_combined_longer$Response)), ]
+```
+
+```{r}
+data_combined_longer = data_combined_longer[!is.na(data_combined_longer$Response), ]
+head(data_combined_longer)
+```
+
+## Aggregated Analysis by Dimension
+
+### Visuals
+```{r}
+score_by_dimension = data_combined_longer %>%
+  group_by(Dimension) %>% 
+  summarise(
+    Count = n(),
+    MeanScore = mean(Response),
+    SdScore = sd(Response)
+  ) %>% 
+  arrange(desc(MeanScore))
+score_by_dimension
+```
+
+```{r}
+data_combined_longer_plot =  data_combined_longer
+data_combined_longer_plot$Dimension = factor(data_combined_longer_plot$Dimension, levels = rev(score_by_dimension$Dimension))
+
+data_combined_longer_plot %>% 
+  ggplot(aes(x=Dimension, y=Response, fill=Dimension)) +
+  geom_boxplot() + 
+  stat_summary(fun=mean, geom="point", shape=20, size=4, color="blue", fill="red") +
+  theme(axis.text.x = element_text(vjust = 0.5, hjust=1)) +
+  coord_flip() + 
+  ggthemes::theme_pander() + 
+  theme(legend.position="none")
+```
+
+### Statistical Comparison
+
+```{r}
+# Compute the analysis of variance
+res.aov <- aov(Response ~ Dimension, data = data_combined_longer)
+
+# Summary of the analysis
+summary(res.aov)
+# TukeyHSD(res.aov)  # Too many comparisons
+```
+
+## Aggregated Analysis by Dimension and Question
+
+### Visuals
+```{r}
+score_by_dimension_question = data_combined_longer %>%
+  group_by(Dimension, Question, QuestionText) %>% 
+  summarise(
+    Count = n(),
+    MeanScore = mean(Response),
+    SdScore = sd(Response)
+  ) %>% 
+  ungroup() %>% 
+  arrange(Dimension, desc(MeanScore))
+
+
+score_by_dimension_question
+```
+
+```{r}
+score_by_dimension_question %>% 
+  dplyr::arrange(MeanScore)
+```
+
+### Word Cloud
+
+#### Lowest Score
+
+```{r}
+num = 10
+text = score_by_dimension_question %>%
+  dplyr::arrange(MeanScore) %>% 
+  head(num) %>% 
+  dplyr::select("QuestionText") %>% 
+  pluck(1)
+```
+
+```{r}
+# Load the data as a corpus
+docs = Corpus(VectorSource(text))
+
+# Convert the text to lower case
+docs <- tm_map(docs, content_transformer(tolower))
+# Remove numbers
+docs <- tm_map(docs, removeNumbers)
+# Remove english common stopwords
+docs <- tm_map(docs, removeWords, stopwords("english"))
+# Remove punctuations
+docs <- tm_map(docs, removePunctuation)
+# Eliminate extra white spaces
+docs <- tm_map(docs, stripWhitespace)
+# Text stemming
+# docs <- tm_map(docs, stemDocument)
+```
+
+```{r}
+dtm <- TermDocumentMatrix(docs)
+m <- as.matrix(dtm)
+v <- sort(rowSums(m),decreasing=TRUE)
+d <- data.frame(word = names(v),freq=v)
+head(d, 10)
+```
+
+```{r}
+set.seed(1234)
+wordcloud(words = d$word, freq = d$freq, min.freq = 2,
+          max.words=20, random.order=FALSE, rot.per=0.0, 
+          colors=brewer.pal(8, "Dark2"))
+```
+
+#### Highest Score
+
+```{r}
+num = 10
+text = score_by_dimension_question %>%
+  dplyr::arrange(MeanScore) %>% 
+  tail(num) %>% 
+  dplyr::select("QuestionText") %>% 
+  pluck(1)
+```
+
+```{r}
+# Load the data as a corpus
+docs = Corpus(VectorSource(text))
+
+# Convert the text to lower case
+docs <- tm_map(docs, content_transformer(tolower))
+# Remove numbers
+docs <- tm_map(docs, removeNumbers)
+# Remove english common stopwords
+docs <- tm_map(docs, removeWords, stopwords("english"))
+# Remove punctuations
+docs <- tm_map(docs, removePunctuation)
+# Eliminate extra white spaces
+docs <- tm_map(docs, stripWhitespace)
+# Text stemming
+# docs <- tm_map(docs, stemDocument)
+```
+
+```{r}
+dtm <- TermDocumentMatrix(docs)
+m <- as.matrix(dtm)
+v <- sort(rowSums(m),decreasing=TRUE)
+d <- data.frame(word = names(v),freq=v)
+head(d, 10)
+```
+
+```{r}
+set.seed(1234)
+wordcloud(words = d$word, freq = d$freq, min.freq = 2,
+          max.words=20, random.order=FALSE, rot.per=0.0, 
+          colors=brewer.pal(8, "Dark2"))
+```
+
+
+## By Gender
+
+### Visual (Diversity and Inclusion)
+
+```{r}
+data_combined_longer %>% 
+  dplyr::filter(Dimension %in% c("Diversity", "Inclusion")) %>% 
+  ggplot(aes(x=Gender, y=Response, fill=Gender)) +
+  facet_wrap(vars(Dimension), ncol = 3) + 
+  geom_boxplot() + 
+  stat_summary(fun=mean, geom="point", shape=20, size=4, color="blue", fill="red") +
+  theme(axis.text.x = element_text(vjust = 0.5, hjust=1)) +
+  coord_flip() + 
+  ggthemes::theme_pander() + 
+  theme(legend.position="none")
+```
+
+```{r}
+# Is this discrepancy broad based?
+data_combined_longer %>% 
+  ggplot(aes(x=Gender, y=Response, fill=Gender)) +
+  facet_wrap(vars(Dimension), ncol = 3) + 
+  geom_boxplot() + 
+  stat_summary(fun=mean, geom="point", shape=20, size=4, color="blue", fill="red") +
+  theme(axis.text.x = element_text(vjust = 0.5, hjust=1)) +
+  coord_flip() + 
+  ggthemes::theme_pander() + 
+  theme(legend.position="none")
+```
+
+**Missing Values**: 
+* Could mean that these genders were not known OR Could mean that they dont identify as either Male or Female.
+* If former, then it is not so much of an issues since once we add the correct gender (Male or Female), they will not skew the distributions much. 
+* However, if these employees identify as non-binary, then this means that they are in general not scoring the questions as high as Male or Female employees. This is something that may need to be looked at.
+
+### Statistical Comparison
+
+#### Diversity
+
+```{r}
+# Compute the analysis of variance
+res.aov <- aov(Response ~ Gender, data = data_combined_longer %>% dplyr::filter(Dimension == "Diversity"))
+
+# Summary of the analysis
+summary(res.aov)
+```
+
+```{r}
+TukeyHSD(res.aov)  # Too many comparisons
+```
+
+#### Inclusion
+
+```{r}
+# Compute the analysis of variance
+res.aov <- aov(Response ~ Gender, data = data_combined_longer %>% dplyr::filter(Dimension == "Inclusion"))
+
+# Summary of the analysis
+summary(res.aov)
+```
+
+```{r}
+TukeyHSD(res.aov)  # Too many comparisons
+```
+
+```{r}
+score_by_gender_ninebox_dimension =  data_combined_longer %>% 
+  group_by(Gender, PotCoord, PerfCoord, Dimension) %>% 
+  summarise(
+    Count = n(),
+    MeanScore = mean(Response),
+    SdScore = sd(Response)
+  ) %>% 
+  arrange(Dimension, Gender, PotCoord, PerfCoord, desc(MeanScore)) %>%  
+  # drop_na() %>% 
+  ungroup()
+
+score_by_gender_ninebox_dimension
+```
+
+#### More Visuals 
+```{r fig.width=10, fig.height=4}
+plot_data = score_by_gender_ninebox_dimension %>% 
+  dplyr::filter(Dimension %in% c("Diversity"))
+
+plot_data %>% 
+  ggplot(aes(x=PerfCoord, y=PotCoord, fill=MeanScore)) +
+  facet_wrap(vars(Dimension, Gender), ncol = 3) + 
+  geom_tile() +
+  # scale_fill_gradient(low = "yellow", high = "red") +
+  scale_fill_gradient2(low = "darkred", mid='yellow', high = "green", na.value = NA
+                       ,midpoint=4.8 #quantile(plot_data$MeanScore, 0.5)[[1]]
+                       ,limits=c(4, 5.6)
+                       )  +
+  geom_text(data = plot_data, label = round(plot_data$MeanScore,1)) + 
+  labs(x='Perfromance',y='Potential',fill='Mean Score') +
+  ggthemes::theme_pander()
+```
+
+```{r fig.width=10, fig.height=4}
+plot_data = score_by_gender_ninebox_dimension %>% 
+  dplyr::filter(Dimension %in% c("Inclusion"))
+
+plot_data %>% 
+  ggplot(aes(x=PerfCoord, y=PotCoord, fill=MeanScore)) +
+  facet_wrap(vars(Dimension, Gender), ncol = 3) + 
+  geom_tile() +
+  # scale_fill_gradient(low = "yellow", high = "red") +
+  scale_fill_gradient2(low = "darkred", mid='yellow', high = "green", na.value = NA
+                       ,midpoint=4.8 #quantile(plot_data$MeanScore, 0.5)[[1]]
+                       ,limits=c(4, 5.6)
+                       )  +
+  geom_text(data = plot_data, label = round(plot_data$MeanScore,1)) + 
+  labs(x='Perfromance',y='Potential',fill='Mean Score') +
+  ggthemes::theme_pander()
+```
+
+## By Race, Ethinicity
+
+### Visual (Diversity and Inclusion)
+
+```{r}
+data_combined_longer %>% 
+  dplyr::filter(Dimension %in% c("Diversity", "Inclusion")) %>% 
+  ggplot(aes(x=RaceEthnicity, y=Response, fill=RaceEthnicity)) +
+  facet_wrap(vars(Dimension), ncol = 2) + 
+  geom_boxplot() + 
+  stat_summary(fun=mean, geom="point", shape=20, size=4, color="blue", fill="red") +
+  theme(axis.text.x = element_text(vjust = 0.5, hjust=1)) +
+  coord_flip() + 
+  ggthemes::theme_pander() + 
+  theme(legend.position="none")
+```
+
+**Observations**
+
+- "White ..." and "Asian ..." seem to feel more included compared to some other race/ethnicities
+- Similar signals can be seen in the response to diversity
+
+```{r fig.height=8}
+# Is it broad based?
+data_combined_longer %>% 
+  ggplot(aes(x=RaceEthnicity, y=Response, fill=RaceEthnicity)) +
+  facet_wrap(vars(Dimension), ncol = 4) + 
+  geom_boxplot() + 
+  stat_summary(fun=mean, geom="point", shape=20, size=4, color="blue", fill="red") +
+  theme(axis.text.x = element_text(vjust = 0.5, hjust=1)) +
+  coord_flip() + 
+  ggthemes::theme_pander() + 
+  theme(legend.position="none")
+```
+
+### Statistical Comparison
+
+#### Diversity
+
+```{r}
+# Compute the analysis of variance
+res.aov <- aov(Response ~ RaceEthnicity, data = data_combined_longer %>% dplyr::filter(Dimension == "Diversity"))
+
+# Summary of the analysis
+summary(res.aov)
+```
+
+```{r}
+TukeyHSD(res.aov)  # Too many comparisons
+```
+
+#### Inclusion
+
+```{r}
+# Compute the analysis of variance
+res.aov <- aov(Response ~ RaceEthnicity, data = data_combined_longer %>% dplyr::filter(Dimension == "Inclusion"))
+
+# Summary of the analysis
+summary(res.aov)
+```
+
+```{r}
+TukeyHSD(res.aov)  # Too many comparisons
+```
+
+```{r}
+score_by_race_ninebox_dimension =  data_combined_longer %>% 
+  group_by(RaceEthnicity, PotCoord, PerfCoord, Dimension) %>% 
+  summarise(
+    Count = n(),
+    MeanScore = mean(Response),
+    SdScore = sd(Response)
+  ) %>% 
+  arrange(Dimension, RaceEthnicity, PotCoord, PerfCoord, desc(MeanScore)) %>%  
+  # drop_na() %>% 
+  ungroup()
+
+score_by_race_ninebox_dimension
+```
+
+#### More Visuals (Diversity and Inclusion)
+```{r fig.width=10, fig.height=8}
+plot_data = score_by_race_ninebox_dimension %>% 
+  dplyr::filter(Dimension %in% c("Diversity"))
+
+plot_data %>% 
+  ggplot(aes(x=PerfCoord, y=PotCoord, fill=MeanScore)) +
+  facet_wrap(vars(Dimension, RaceEthnicity), ncol = 3) + 
+  geom_tile() +
+  # scale_fill_gradient(low = "yellow", high = "red") +
+  scale_fill_gradient2(low = "darkred", mid='yellow', high = "green", na.value = NA
+                       ,midpoint=4.8 #quantile(plot_data$MeanScore, 0.5)[[1]]
+                       ,limits=c(4, 5.6)
+                       )  +
+  geom_text(data = plot_data, label = round(plot_data$MeanScore,1)) + 
+  labs(x='Perfromance',y='Potential',fill='Mean Score') +
+  ggthemes::theme_pander()
+```
+
+```{r fig.width=10, fig.height=8}
+plot_data = score_by_race_ninebox_dimension %>% 
+  dplyr::filter(Dimension %in% c("Inclusion"))
+
+plot_data %>% 
+  ggplot(aes(x=PerfCoord, y=PotCoord, fill=MeanScore)) +
+  facet_wrap(vars(Dimension, RaceEthnicity), ncol = 3) + 
+  geom_tile() +
+  # scale_fill_gradient(low = "yellow", high = "red") +
+  scale_fill_gradient2(low = "darkred", mid='yellow', high = "green", na.value = NA
+                       ,midpoint=4.8 #quantile(plot_data$MeanScore, 0.5)[[1]]
+                       ,limits=c(4, 5.6)
+                       )  +
+  geom_text(data = plot_data, label = round(plot_data$MeanScore,1)) + 
+  labs(x='Perfromance',y='Potential',fill='Mean Score') +
+  ggthemes::theme_pander()
+```
+
+
+
+## More Segmented Analysis
+
+* The analysis performed above can be repeated on various vectors such as 
+  - By Tenure
+  - Manager vs. Individual Contributor
+  - By Business Unit
+  - By Exempt Status
+
+I will leave this as a post presentation exercise, but the steps involved would be similar to what is outlined above for Gender, and Race/Ethnicity.
+
+
+# Predicting Attrition
+
+The next part of the study will focus on building a model to predict attrition based on the survey response and identifying factors that may be correlated with attrition. We will end with an action plan aimed at reducing the attrition of high potential/performance employees.
+
+This part of the study will be done in Python so we will export the cleaned data from R and import that back in Python.
+
+```{r}
+write.csv(data_combined, file = "../data/data_combined.csv", row.names = FALSE)
+```
+
+# Conclusion
+
+- Deep dive into other "dimensions"
+- Deep Dive into individual questions with each dimension
+- Followup on Gender, Race/Ethnicity response differences found
+- Create a formalized action plan to retain high performance/potential employees who are likely to leave voluntarily 
+
